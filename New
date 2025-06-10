@@ -1,0 +1,54 @@
+from flask import request, jsonify
+import pandas as pd
+
+@app.route('/confirm-update', methods=['POST', 'OPTIONS'])
+def confirm_update():
+    if request.method == 'OPTIONS':
+        # CORS preflight response
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        return response, 200
+
+    data = request.get_json()
+    request_id = data.get("request_id")
+    decision = data.get("decision", "").lower()
+
+    if not request_id or request_id not in PENDING_REQUESTS:
+        return jsonify({"error": "Invalid request_id"}), 400
+
+    # Retrieve and remove the pending request
+    request_data = PENDING_REQUESTS.pop(request_id)
+
+    if decision == "yes":
+        # Make a copy to avoid modifying the original
+        standard_df = request_data["updated_template"].copy()
+
+        # Add unmatched columns if missing
+        for col in request_data["unmatched_cols"]:
+            if col not in standard_df.columns:
+                standard_df[col] = pd.NA
+
+        # Create backup path
+        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = request_data["template_path"].replace(".xlsx", f"_backup_{timestamp}.xlsx")
+
+        # Save using context manager to ensure proper flushing
+        try:
+            with pd.ExcelWriter(backup_path, engine='openpyxl') as writer:
+                standard_df.to_excel(writer, index=False)
+
+            with pd.ExcelWriter(request_data["template_path"], engine='openpyxl') as writer:
+                standard_df.to_excel(writer, index=False)
+
+        except Exception as e:
+            return jsonify({"error": f"Failed to save Excel: {str(e)}"}), 500
+
+        # Rebuild FAISS index with freshly loaded documents
+        build_faiss_index(load_ciq_documents(FOLDERS["standard_ciq"]), "standard_ciq")
+
+        return jsonify({"status": "updated", "message": "✅ Standard CIQ template updated."})
+    
+    else:
+        return jsonify({"status": "skipped", "message": "❌ Update skipped as per user decision."})
